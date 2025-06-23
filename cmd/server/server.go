@@ -1,7 +1,6 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,13 +9,13 @@ import (
 	"syscall"
 	"time"
 
-	cmd2 "github.com/axellelanca/urlshortener/cmd"
-	"github.com/axellelanca/urlshortener/internal/api"
-	"github.com/axellelanca/urlshortener/internal/models"
-	"github.com/axellelanca/urlshortener/internal/monitor"
-	"github.com/axellelanca/urlshortener/internal/repository"
-	"github.com/axellelanca/urlshortener/internal/services"
-	"github.com/axellelanca/urlshortener/internal/workers"
+	cmd2 "github.com/bkaygisiz/url-shortener/cmd"
+	"github.com/bkaygisiz/url-shortener/internal/api"
+	"github.com/bkaygisiz/url-shortener/internal/models"
+	"github.com/bkaygisiz/url-shortener/internal/monitor"
+	"github.com/bkaygisiz/url-shortener/internal/repository"
+	"github.com/bkaygisiz/url-shortener/internal/services"
+	"github.com/bkaygisiz/url-shortener/internal/workers"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cobra"
 	"gorm.io/driver/sqlite" // Driver SQLite pour GORM
@@ -32,42 +31,72 @@ var RunServerCmd = &cobra.Command{
 démarre les workers asynchrones pour les clics et le moniteur d'URLs,
 puis lance le serveur HTTP.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// TODO : Charger la configuration chargée globalement via cmd.cfg
+		// Charger la configuration chargée globalement via cmd.cfg
 		// Ne pas oublier la gestion d'erreur (si nil ?), si erreur, faire un log.Fataf
+		cfg := cmd2.Cfg
+		if cfg == nil {
+			log.Fatalf("FATAL: Configuration non chargée")
+		}
 
-		// TODO : Initialiser la connexion à la base de données SQLite avec GORM.
+		// Initialiser la connexion à la base de données SQLite avec GORM.
 		// Utilisez le nom de la base de données depuis la configuration (cfg.Database.Name).
+		db, err := gorm.Open(sqlite.Open(cfg.Database.Name), &gorm.Config{})
+		if err != nil {
+			log.Fatalf("FATAL: Échec de la connexion à la base de données: %v", err)
+		}
 
-		// TODO : Initialiser les repositories.
+		// S'assurer que la connexion est fermée après l'arrêt du serveur
+		sqlDB, err := db.DB()
+		if err != nil {
+			log.Fatalf("FATAL: Échec de l'obtention de la base de données SQL sous-jacente: %v", err)
+		}
+		defer sqlDB.Close()
+
+		// Exécuter les migrations automatiquement
+		err = db.AutoMigrate(&models.Link{}, &models.Click{})
+		if err != nil {
+			log.Fatalf("FATAL: Échec de la migration: %v", err)
+		}
+
+		// Initialiser les repositories.
 		// Créez des instances de GormLinkRepository et GormClickRepository.
+		linkRepo := repository.NewLinkRepository(db)
+		clickRepo := repository.NewClickRepository(db)
 
 		// Laissez le log
 		log.Println("Repositories initialisés.")
 
-		// TODO : Initialiser les services métiers.
+		// Initialiser les services métiers.
 		// Créez des instances de LinkService et ClickService, en leur passant les repositories nécessaires.
+		linkService := services.NewLinkService(linkRepo, clickRepo)
 
 		// Laissez le log
 		log.Println("Services métiers initialisés.")
 
-		// TODO : Initialiser le channel ClickEventsChannel (api/handlers) des événements de clic et lancer les workers (StartClickWorkers).
+		// Initialiser le channel ClickEventsChannel (api/handlers) des événements de clic et lancer les workers (StartClickWorkers).
 		// Le channel est bufferisé avec la taille configurée.
 		// Passez le channel et le clickRepo aux workers.
+		clickEventsChannel := make(chan models.ClickEvent, cfg.Analytics.BufferSize)
+		workers.StartClickWorkers(cfg.Analytics.WorkerCount, clickEventsChannel, clickRepo)
 
-		// TODO : Remplacer les XXX par les bonnes variables
 		log.Printf("Channel d'événements de clic initialisé avec un buffer de %d. %d worker(s) de clics démarré(s).",
-			XXX, XXX)
+			cfg.Analytics.BufferSize, cfg.Analytics.WorkerCount)
 
-		// TODO : Initialiser et lancer le moniteur d'URLs.
+		// Initialiser et lancer le moniteur d'URLs.
 		// Utilisez l'intervalle configuré (cfg.Monitor.IntervalMinutes).
 		// Lancez le moniteur dans sa propre goroutine.
-		monitorInterval := time.Duration(XXX) * time.Minute
-		urlMonitor := monitor.NewUrlMonitor() // Le moniteur a besoin du linkRepo et de l'interval
+		monitorInterval := time.Duration(cfg.Monitor.IntervalMinutes) * time.Minute
+		urlMonitor := monitor.NewUrlMonitor(linkRepo, monitorInterval)
 		go urlMonitor.Start()
 		log.Printf("Moniteur d'URLs démarré avec un intervalle de %v.", monitorInterval)
 
-		// TODO : Configurer le routeur Gin et les handlers API.
+		// Configurer le routeur Gin et les handlers API.
 		// Passez les services nécessaires aux fonctions de configuration des routes.
+		router := gin.Default()
+
+		// Set the global channel in the API handlers
+		api.ClickEventsChannel = clickEventsChannel
+		api.SetupRoutes(router, linkService, cfg.Analytics.BufferSize)
 
 		// Pas toucher au log
 		log.Println("Routes API configurées.")
@@ -79,8 +108,15 @@ puis lance le serveur HTTP.`,
 			Handler: router,
 		}
 
-		// TODO : Démarrer le serveur Gin dans une goroutine anonyme pour ne pas bloquer.
+		// Démarrer le serveur Gin dans une goroutine anonyme pour ne pas bloquer.
 		// Pensez à logger des ptites informations...
+		go func() {
+			log.Printf("Serveur HTTP démarré sur le port %d", cfg.Server.Port)
+			log.Printf("URL de base: %s", cfg.Server.BaseURL)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("FATAL: Échec du démarrage du serveur: %v", err)
+			}
+		}()
 
 		// Gére l'arrêt propre du serveur (graceful shutdown).
 		// Créez un channel pour les signaux OS (SIGINT, SIGTERM).
@@ -100,5 +136,6 @@ puis lance le serveur HTTP.`,
 }
 
 func init() {
-	// TODO : ajouter la commande
+	// ajouter la commande
+	cmd2.RootCmd.AddCommand(RunServerCmd)
 }
